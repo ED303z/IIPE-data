@@ -1,12 +1,14 @@
 import os
 import pandas as pd
-import matplotlib.pyplot as plt
-import nltk  # , re
+import nltk
+import requests
+import bs4
+from tqdm import tqdm
 from nltk.corpus import stopwords
 from nltk.tokenize import sent_tokenize, word_tokenize
 from nltk.stem import WordNetLemmatizer
 from collections import Counter
-from IIPE.constants import NEW_STOP_WORDS
+from IIPE.constants import ALL_STOP_WORDS
 
 
 def make_contents_df(lst):
@@ -14,7 +16,7 @@ def make_contents_df(lst):
     # init a list of dictionnaries
     ld_contents = []
 
-    for file in lst:
+    for file in tqdm(lst):
         if file.endswith(".txt"):
             # keeping the reference and the date
             split = (
@@ -48,8 +50,7 @@ def make_tokens(df):
     TotalText = list(df.text.values)
 
     # stopwords, with plurals (otherwise the lemmatizong steps puts some of the stopwords back)
-    NEW_STOP_WORDS
-    stopwords = stopwords.union(NEW_STOP_WORDS)
+    stopwords = stopwords.union(ALL_STOP_WORDS)
     TotalText = " ".join(TotalText)
 
     # tokenization
@@ -65,6 +66,112 @@ def make_tokens(df):
     return lemmatized
 
 
+def get_inspection_reports(local_file=False):
+    """Code provided to scrape tthe education.ie website. We taked the first 142 pages info (where PDFs are located)
+    to return a dataframe with details about the report ['Date', 'School Roll No.', 'County', 'School Name', 'School Level',
+       'Inspection Type', 'Subject, 'URL']"""
+
+    # Prefer the use of a saved csv, as the scraping takes time
+    # After 1st scraping => update csv_path & filename accordingly
+    # For the hackathon, meant to be used with Google Colab
+    if local_file:
+        csv_path = os.path.join("..", "..", "IIPE-colab", "data", "csv")
+        return pd.read_csv(os.path(csv_path, "General_InspectionReports.csv")).drop(
+            columns=["Unnamed: 0"]
+        )
+
+    # Scraping
+    WebpageRoot = "https://www.education.ie/en/Publications/Inspection-Reports-Publications/Whole-School-Evaluation-Reports-List/?pageNumber="
+    General_InspectionReports = pd.DataFrame(
+        columns=[
+            "Date",
+            "School Roll No.",
+            "County",
+            "School Name",
+            "School Level",
+            "Inspection Type",
+            "Subject",
+            "URL",
+        ]
+    )
+
+    for x in range(1, 143):
+        IrelandWebpage = requests.get(WebpageRoot + str(x))
+        CleanIrelandWebpage = bs4.BeautifulSoup(IrelandWebpage.text, "lxml")
+        InspectionReports = {}
+        ID = 0
+        Table = CleanIrelandWebpage.find("table", id="IRList")
+        for p in Table.find_all("tr"):
+            if ID == 0:
+                ID = ID + 1
+                continue
+            else:
+                Date = (
+                    p("td")[0].string[:2]
+                    + "_"
+                    + p("td")[0].string[3:5]
+                    + "_"
+                    + p("td")[0].string[6:]
+                )
+                SchoolRoll = p("td")[1].string
+                County = p("td")[2].string
+                SchoolName = p("td")[3].string
+                SchoolLevel = p("td")[4].string
+                InspectionType = p("td")[5].string
+                Subject = p("td")[6].string
+                URL = p("td")[7]("a")[0].attrs["href"][86:]
+                InspectionReports[ID] = {
+                    "Date": Date,
+                    "School Roll No.": SchoolRoll,
+                    "County": County,
+                    "School Name": SchoolName,
+                    "School Level": SchoolLevel,
+                    "Inspection Type": InspectionType,
+                    "Subject": Subject,
+                    "URL": URL,
+                }
+                ID = ID + 1
+
+        # Dataframe creation
+        df_InspectionReports = pd.DataFrame.from_dict(InspectionReports, orient="index")
+        General_InspectionReports = pd.concat(
+            [General_InspectionReports, df_InspectionReports]
+        )
+        return General_InspectionReports
+
+
+def make_contents_details_df(df_contents, gen_ins_report):
+    """Joins two dataframes to enable an analysis by date and/or by county"""
+
+    # Drop Subject (all NaN) and rename columns for the merge
+    gen_ins_report = gen_ins_report.drop(columns=["Subject"]).rename(
+        columns={"School Roll No.": "reference"}
+    )
+
+    return df_contents.merge(gen_ins_report, on="reference")
+
+
+def date_processed_df(df):
+    """Re-order `Date` string from scraping e.g. '11-04-2014' => '2014-04-11', then convert to datetime"""
+    df["Date"] = df.Date.apply(lambda x: "-".join(x.split("_")[::-1]))
+    df["date_match"] = df["date"] == df["Date"]
+    df["date"] = pd.to_datetime(df.date)
+    df["Date"] = pd.to_datetime(df.date)
+    df["year"] = df["date"].dt.year
+    df["month"] = df["date"].dt.month
+
+    return df
+
+
+def cont_det_by_counties(df):
+    """Creates a dictionary of dataframes, one per county"""
+    counties_df_dict = {}
+    for county in df.County.unique():
+        df_county = df[df["County"] == f"{county}"]
+        counties_df_dict[county] = df
+    return counties_df_dict
+
+
 if __name__ == "__main__":
     os.chdir(os.path.join("data_sample", "plain_text_sample"))
     # print(os.getcwd())
@@ -78,4 +185,5 @@ if __name__ == "__main__":
     # TO DO : convert the prints below into unit tests
     # print(df.shape)
     # print(df.dtypes)
-    print(f"We have {len(tokens)} tokens")
+    # get_inspection_reports(local_file=True) => refactor with try: except:
+    # print(f"We have {len(tokens)} tokens")
